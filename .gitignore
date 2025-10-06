@@ -1,0 +1,85 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.python-version
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / build
+build/
+dist/
+eggs/
+*.egg-info/
+pip-wheel-metadata/
+*.egg
+.wheel/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Jupyter
+.ipynb_checkpoints
+
+# VS Code
+.vscode/
+.history/
+
+# PyCharm / JetBrains
+.idea/
+*.iml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and databases
+*.log
+*.sqlite3
+
+# Secrets / config (add any local config files here)
+.env
+.env.*
+
+# PlatformIO / embedded build (ESP32)
+.pio/
+.pioenvs/
+.pio/build/
+*.pio
+platformio.ini.user
+
+# C/C++ build
+build-*/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+
+# Misc
+*.bak
+*.swp
+*.swo
+
+# Editor temporary files
+*.tmp
+
+# Windows specific
+desktop.ini
+
+# Optional: ignore large binary blobs / firmware images you don't want in repo
+*.bin
+*.hex
+*.elf
