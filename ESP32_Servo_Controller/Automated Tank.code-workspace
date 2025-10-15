@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"name": "ESP32_Servo_Controller",
+			"path": "../ESP32_Servo_Code/ESP32_Servo_Controller"
+		},
+		{
+			"name": "ESP32_Servo_Controller",
+			"path": "."
+		}
+	],
+	"settings": {}
+}

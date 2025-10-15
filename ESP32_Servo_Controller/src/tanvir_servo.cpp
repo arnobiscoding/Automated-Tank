@@ -24,8 +24,8 @@ const char* WS_HOST = "192.168.137.1"; // laptop hotspot IP
 const uint16_t WS_PORT = 8080;
 const char* WS_PATH = "/";
 
-const int SERVO_PAN_PIN = 18;
-const int SERVO_TILT_PIN = 19;
+const int SERVO_PAN_PIN = 13;
+const int SERVO_TILT_PIN = 14;
 
 const int PAN_MIN = 0;
 const int PAN_MAX = 180;

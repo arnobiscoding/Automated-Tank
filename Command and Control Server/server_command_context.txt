@@ -1,0 +1,250 @@
+# Server → ESP32 Command Context (for `esp32_dualcore_servo_dir.ino`)
+
+Below is a clear, copy-ready specification your server should follow when talking to the ESP32 servo node implemented in `esp32_dualcore_servo_dir.ino`. It covers JSON formats, command semantics, lifecycle (ACK / STATUS), error handling, timing, and recommended server behavior (how OpenCV should drive the servo with `MOVE_DIR` / `STOP` and when to use absolute moves). Use this as the authoritative reference for the server implementation.
+
+---
+
+# 1. Basic messaging rules
+
+* Transport: **WebSocket** (text JSON).
+* Every command the server sends SHOULD include a unique `id` (string). The ESP32 echoes that id in `ACK` and in the subsequent `STATUS` for that command.
+* ESP32 replies:
+
+  * Immediately: `ACK` `{ "type":"ACK","id":"<id>" }`
+  * Later: `STATUS` `{ "type":"STATUS","id":"<id>","state":"<STATE>","pan":<int>,"tilt":<int>, ... }`
+* `STATE` values: `"MOVING"`, `"SUCCESS"`, `"CANCELLED"`, `"PREEMPTED"`, `"TIMEOUT"`, `"STOPPED"`, `"ERROR"`.
+
+---
+
+# 2. Supported commands (server → ESP32)
+
+### 2.1 `MOVE` — Absolute move (existing behavior)
+
+Move pan/tilt to a specified angle (0–180).
+
+```json
+{ "type": "MOVE", "id": "move-001", "pan": 120, "tilt": 80 }
+```
+
+* ESP32: ACK immediately, queue the command for execution, then run it (ABSOLUTE activeMode = 1). On finish sends `STATUS` `"SUCCESS"` (or `"TIMEOUT"`, `"PREEMPTED"`, `"CANCELLED"`).
+
+### 2.2 `MOVE_DIR` — Directional continuous movement (new)
+
+Start continuous movement in given directions. Runs until `STOP`/`CANCEL`/timeout/preempt.
+
+```json
+{ "type": "MOVE_DIR",
+  "id": "dir-001",
+  "pan_dir": "RIGHT",    // "LEFT" | "RIGHT" | "NONE"
+  "tilt_dir": "NONE",    // "UP" | "DOWN" | "NONE"
+  "speed": 2             // optional, integer degrees/step (1..10 recommended)
+}
+```
+
+* ESP32: ACK immediately, set `activeMode = 2` (directional), set `panDir`/`tiltDir` and `moveSpeed`, set `hasActive=true`, send `STATUS` `"MOVING"`.
+* ESP32 will step `currentPan`/`currentTilt` every `STEP_INTERVAL_MS` (firmware default 15 ms) by `moveSpeed` degrees until a stop or timeout.
+
+### 2.3 `STOP` — Stop directional movement
+
+Stop the active directional command. If `id` provided and matches active command, stops it; if `id` empty, stops whatever is active.
+
+```json
+{ "type": "STOP", "id": "dir-001" }      // or id: ""
+```
+
+* ESP32: ACK, set `panDir=tiltDir=0`, `activeMode=0`, `hasActive=false`, send `STATUS` `"STOPPED"`.
+
+### 2.4 `CANCEL` — Cancel queued/active absolute command
+
+Cancels a `MOVE` command (queued or active).
+
+```json
+{ "type": "CANCEL", "id": "move-001" }
+```
+
+* ESP32: ACK. If command found or active, sets `cancelFlag` (if active) or removes from queue; returns `STATUS` `"CANCELLED"`; if not found returns `STATUS` `"ERROR","error":"not_active"`.
+
+### 2.5 `STATUS_REQ` — Request immediate status
+
+```json
+{ "type": "STATUS_REQ", "id": "status-001" }
+```
+
+* ESP32: Responds with `STATUS` immediately, includes `pan` and `tilt` and `state` (`"BUSY"` or `"IDLE"`).
+
+---
+
+# 3. Server behavior / flow for object-centering use case
+
+### Goal
+
+Server sees object offset from camera center (x, y in pixels). It should command the ESP32 to continuously move the servo in the necessary direction until centered, then stop that motion and handle the other axis.
+
+### Mapping vision → commands
+
+* If object.x > center_x + deadband → send `MOVE_DIR` with `pan_dir: "RIGHT"`.
+* If object.x < center_x - deadband → send `MOVE_DIR` with `pan_dir: "LEFT"`.
+* If abs(object.x - center_x) ≤ deadband → send `STOP` for the pan command.
+* Repeat same logic for vertical axis:
+
+  * object.y > center_y + deadband → `tilt_dir: "DOWN"` (camera coords may flip; confirm mapping)
+  * object.y < center_y - deadband → `tilt_dir: "UP"`
+
+### Recommended deadband
+
+* Use a pixel tolerance (deadband) to avoid oscillation. E.g., `deadband = 30–60 px` depending on FOV and servo sensitivity.
+
+### Example sequence (pan then tilt)
+
+1. Object detected at x = center + 150 → send:
+
+```json
+{ "type":"MOVE_DIR","id":"pan-001","pan_dir":"RIGHT","tilt_dir":"NONE","speed":2 }
+```
+
+2. ESP32: ACK `pan-001`, STATUS `"MOVING"`.
+3. Continue tracking; when object.x enters deadband around center → server sends:
+
+```json
+{ "type":"STOP","id":"pan-001" }
+```
+
+4. ESP32: ACK, STATUS `"STOPPED","id":"pan-001"`.
+5. Then server checks vertical offset and uses `MOVE_DIR` for `tilt` similarly.
+
+### Bidirectional simultaneous movement
+
+* If object requires both horizontal & vertical correction, send a single `MOVE_DIR` with both `pan_dir` and `tilt_dir` set (e.g., `RIGHT` + `UP`) so ESP32 moves diagonally.
+
+---
+
+# 4. IDs, retries and timeouts (server responsibilities)
+
+* **Unique IDs**: Each command should have a unique id (UUID or incrementing counter). Reuse the same id for the STOP/CANCEL that refers to that command (recommended).
+* **ACK handling**:
+
+  * After sending a command, wait for `ACK` for a short time (e.g., 200–500 ms). If no ACK, retry sending command up to N times (N=2 recommended).
+  * If still no ACK, consider reconnecting WS or alerting operator.
+* **STATUS expectations**:
+
+  * After `MOVE_DIR` the ESP32 immediately sends `STATUS "MOVING"`. Final `STATUS` (`STOPPED`, `TIMEOUT`, `PREEMPTED`) will come later.
+* **Command timeout**:
+
+  * ESP32 will auto-timeout directional commands after `COMMAND_TIMEOUT_MS` (~4000 ms default). Server should refresh commands (re-send `MOVE_DIR`) if movement must continue beyond that.
+  * Recommended: server can re-send the same `MOVE_DIR` id before timeout to keep it alive, or send a new `MOVE_DIR` id to preempt previous (firmware treats new directional command as preemption and will send `PREEMPTED` for prior).
+* **Cancel/Stop semantics**:
+
+  * `STOP` is the preferred way to stop a directional command when centered. `CANCEL` is for absolute queued commands (or to cancel an active absolute command).
+* **Preemption**:
+
+  * Sending a new `MOVE` or `MOVE_DIR` while another command is active will cause the firmware to return `PREEMPTED` for the prior active command and start the new one.
+
+---
+
+# 5. Recommended server timing and debouncing (stability tips)
+
+* Only send `MOVE_DIR` when the object has stayed outside the deadband for a small confirmation window (e.g., 2–3 consecutive frames) to avoid sending many short commands.
+* After sending `MOVE_DIR`, avoid sending repeated identical `MOVE_DIR` until you either get `STOP` conditions or decide to refresh (e.g., at half the firmware timeout).
+* On `STOP`, wait for `STATUS "STOPPED" / ACK` before issuing the next `MOVE_DIR` for the other axis (or use different ids but avoid flooding).
+* Use conservative `speed` (1–3) if the camera is sensitive; increase if response is sluggish.
+
+---
+
+# 6. Error handling / diagnostic guidance
+
+* If the ESP32 returns `STATUS` with `"ERROR"` and `"error":"not_active"` for a CANCEL/STOP — the server must accept the servo is already idle and proceed.
+* If repeated `TIMEOUT` occurs, check servo power / wiring / blocked motion — server should log and possibly pause further movement commands.
+* If WS disconnects, the server should re-establish and re-send any necessary state-init commands (e.g., `MOVE` to center or reissue latest desired continuous `MOVE_DIR`).
+
+---
+
+# 7. Minimal server pseudocode (polling OpenCV → WS)
+
+```python
+# high-level pseudocode
+deadband = 50
+current_pan_cmd_id = None
+current_tilt_cmd_id = None
+
+while True:
+  cx, cy = get_object_center()  # None if lost
+  if cx is None:
+    # lost target → stop any active movement
+    if current_pan_cmd_id: send_stop(current_pan_cmd_id); current_pan_cmd_id = None
+    if current_tilt_cmd_id: send_stop(current_tilt_cmd_id); current_tilt_cmd_id = None
+    continue
+
+  dx = cx - center_x
+  dy = cy - center_y
+
+  # HORIZONTAL
+  if dx > deadband:
+    if current_pan_cmd_id is None:
+      id = gen_id()
+      send_move_dir(id, pan_dir="RIGHT", tilt_dir="NONE", speed=2)
+      current_pan_cmd_id = id
+  elif dx < -deadband:
+    if current_pan_cmd_id is None:
+      id = gen_id()
+      send_move_dir(id, pan_dir="LEFT", tilt_dir="NONE", speed=2)
+      current_pan_cmd_id = id
+  else:
+    if current_pan_cmd_id:
+      send_stop(current_pan_cmd_id)
+      current_pan_cmd_id = None
+
+  # VERTICAL (same pattern)
+  if dy > deadband:
+    ...
+```
+
+* `send_move_dir(id, ...)` must wait/handle `ACK`. If no ACK → retry once.
+* Monitor `STATUS` messages: clear `current_*_cmd_id` on `STOPPED`/`CANCELLED`/`SUCCESS`/`TIMEOUT`/`PREEMPTED`.
+
+---
+
+# 8. Example JSON flows
+
+1. Start moving right:
+
+```json
+-> { "type":"MOVE_DIR", "id":"dir-01", "pan_dir":"RIGHT", "tilt_dir":"NONE", "speed":2 }
+<- ACK { "type":"ACK","id":"dir-01" }
+<- STATUS { "type":"STATUS","id":"dir-01","state":"MOVING","pan":95,"tilt":90 }
+...
+<- STATUS { "type":"STATUS","id":"dir-01","state":"STOPPED","pan":102,"tilt":90 }
+```
+
+2. Preemption: send absolute move while directional moving:
+
+```json
+-> { "type":"MOVE", "id":"move-02", "pan":120, "tilt":90 }
+<- ACK { "type":"ACK","id":"move-02" }
+<- STATUS { "type":"STATUS","id":"dir-01","state":"PREEMPTED", ... }
+<- STATUS { "type":"STATUS","id":"move-02","state":"MOVING", ... }  // then SUCCESS later
+```
+
+3. Timeout: If no STOP received, ESP32 sends TIMEOUT after COMMAND_TIMEOUT_MS:
+
+```json
+<- STATUS { "type":"STATUS","id":"dir-01","state":"TIMEOUT","pan":150,"tilt":90 }
+```
+
+---
+
+# 9. Additional recommendations
+
+* Use UUIDs for ids (e.g., `dir-20251015-0001`).
+* Keep server-side logs for ACK/STATUS to debug intermittent problems.
+* If you need continuous "keep alive" beyond the firmware timeout, either:
+
+  * Re-send the same `MOVE_DIR` with the same id before timeout (firmware will treat it as preempt or new, so choose a strategy), OR
+  * Implement server-side logic to send brief `STOP`/`MOVE_DIR` cycles carefully (not preferred).
+* Consider adding a small “safety zone” mapping so that when close to servo mechanical limits, server stops sending commands that could push against limits.
+
+---
+
+If you want, I can:
+
+* Produce ready-to-run **Python server code** that links your OpenCV tracker to this command model (handles ACKs, retries, deadband, id management, and maps pixels→`MOVE_DIR`/`STOP`), or
+* Generate sample **unit tests** / simulated sequences to verify server ↔ ESP32 interactions. Which would you like next?
