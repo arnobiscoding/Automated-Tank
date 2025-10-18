@@ -1,293 +1,229 @@
-"""
-Red Object Tracker + Servo Controller GUI
-- Video feed: 640x480
-- Logs box on the right
-- Sends MOVE_DIR commands via WebSocket to ESP32 based on tracking
-"""
-
-import sys
-import json
-import asyncio
-import threading
-import time
-import cv2
-import numpy as np
-from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLabel
-)
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
+import sys, json, uuid, cv2, numpy as np, time, asyncio, threading
+from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QTextEdit, QLabel
 from PyQt5.QtGui import QImage, QPixmap
-
+from PyQt5.QtCore import QTimer, Qt, QObject, pyqtSignal, pyqtSlot
 import websockets
 
 # CONFIG
-WS_HOST = "192.168.137.1"   # ESP32 should connect to this IP
 WS_PORT = 8080
+STEP_RADIUS = 50     # pixels tolerance to consider “centered”
+MOVE_SPEED = 2       # degrees per step for directional MOVE
 
-# --- Server object to run in separate thread and emit signals ---
+# ---------------- WebSocket SERVER -----------------
 class WsServer(QObject):
     sig_log = pyqtSignal(str)
-    sig_msg = pyqtSignal(str)
-    sig_ready = pyqtSignal()
 
-    def __init__(self):
+    def __init__(self, port):
         super().__init__()
-        self.loop = None
-        self.server = None
-        self.clients = set()
-        self.out_queue = None
-        self._thread = None
-        self.running = False
-
-    def start(self):
-        if self._thread and self._thread.is_alive():
-            return
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
-        self._thread.start()
-
-    def _run_loop(self):
+        self.port = port
         self.loop = asyncio.new_event_loop()
+        self.connected_clients = set()
+        self.thread = threading.Thread(target=self.run_loop, daemon=True)
+        self.thread.start()
+
+    def run_loop(self):
         asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self.start_server())
+        self.loop.run_forever()
 
-        async def _init_server():
-            self.out_queue = asyncio.Queue()
-            server = await websockets.serve(self._handler, "0.0.0.0", WS_PORT)
-            return server
+    async def start_server(self):
+        # FIX: We use a lambda here to correctly accept the (websocket, path)
+        # arguments from websockets.serve and pass them to the instance handler method.
+        server = await websockets.serve(
+            lambda ws, path: self.handler(ws, path), 
+            "0.0.0.0",
+            self.port,
+            ping_interval=5,
+            ping_timeout=2
+        )
+        self.sig_log.emit(f"[SERVER] Listening on ws://0.0.0.0:{self.port}")
+        return server
 
-        self.server = self.loop.run_until_complete(_init_server())
-        self.sig_log.emit(f"[SERVER] Listening on ws://0.0.0.0:{WS_PORT}")
-        self.sig_ready.emit()
-        self.loop.create_task(self._sender_task())
-        self.running = True
-        try:
-            self.loop.run_forever()
-        finally:
-            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
-            self.loop.close()
-            self.sig_log.emit("[SERVER] Loop closed")
-
-    async def _handler(self, websocket, path=None):
-        addr = websocket.remote_address
-        self.clients.add(websocket)
-        self.sig_log.emit(f"[CONNECT] Client connected: {addr}")
+    async def handler(self, websocket, path): # Correctly accepts 'websocket' and 'path'
+        self.connected_clients.add(websocket)
+        client_ip = websocket.remote_address[0]
+        self.sig_log.emit(f"[CONNECT] Client connected: {client_ip} on path {path}")
         try:
             async for message in websocket:
                 self.sig_log.emit(f"[RX] {message}")
-                self.sig_msg.emit(message)
-        except websockets.ConnectionClosed:
-            self.sig_log.emit(f"[DISCONNECT] Client {addr} disconnected")
-        finally:
-            self.clients.discard(websocket)
+                data = json.loads(message)
+                if data.get("type")=="HELLO":
+                    # Simple HELLO ACK response
+                    await websocket.send(json.dumps({"type":"HELLO_ACK"}))
+                elif data.get("type")=="STATUS":
+                    # Simple logging for status updates from ESP32
+                    self.sig_log.emit(f"[STATUS] Cmd {data.get('id')} -> {data.get('state')}")
 
-    async def _sender_task(self):
-        while True:
-            msg = await self.out_queue.get()
-            if msg is None:
-                break
-            s = json.dumps(msg)
-            dead = []
-            if not self.clients:
-                self.sig_log.emit("[SENDER] No clients connected; message dropped")
-            for c in list(self.clients):
-                try:
-                    await c.send(s)
-                    self.sig_log.emit(f"[TX->{c.remote_address}] {s}")
-                except Exception as e:
-                    self.sig_log.emit(f"[SENDER ERR] {e}")
-                    dead.append(c)
-            for d in dead:
-                self.clients.discard(d)
-
-    def send_json(self, obj):
-        if not self.loop or not self.running:
-            self.sig_log.emit("[ERROR] Server not running")
-            return
-        fut = asyncio.run_coroutine_threadsafe(self.out_queue.put(obj), self.loop)
-        try:
-            fut.result(timeout=1.0)
         except Exception as e:
-            self.sig_log.emit(f"[ERROR] send_json: {e}")
+            if not isinstance(e, (websockets.exceptions.ConnectionClosedOK, websockets.exceptions.ConnectionClosedError)):
+                self.sig_log.emit(f"[ERROR] {type(e).__name__}: {e}")
+        finally:
+            if websocket in self.connected_clients:
+                self.connected_clients.remove(websocket)
+            self.sig_log.emit(f"[DISCONNECT] Client disconnected: {client_ip}")
 
-    def stop(self):
-        if not self.loop:
-            return
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        self.running = False
+    def broadcast_json(self, obj):
+        msg = json.dumps(obj)
+        # Use a copy of the set in case clients disconnect during broadcast
+        for ws in list(self.connected_clients):
+            if ws.open:
+                try: 
+                    # Use asyncio.run_coroutine_threadsafe to send from a different thread (PyQt main thread)
+                    future = asyncio.run_coroutine_threadsafe(ws.send(msg), self.loop)
+                    # Wait briefly for send to schedule/start (timeout=0.1)
+                    future.result(timeout=0.1) 
+                except Exception as e: 
+                    self.sig_log.emit(f"[ERROR] broadcast: {e}")
+        self.sig_log.emit(f"[TX] {msg}")
 
-
-# ---------- Main GUI ----------
-class TrackerGUI(QWidget):
+# ---------------- PyQt5 GUI & CV Tracking -----------------
+class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Red Object Tracker + Servo Controller")
-        self.setGeometry(200, 100, 900, 540)
-
-        self.server = WsServer()
-        self.server.sig_log.connect(self.append_log)
-        self.server.sig_msg.connect(self.on_incoming_message)
-        self.server.sig_ready.connect(self.on_server_ready)
-        self.server.start()
-
-        self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-
-        self.last_cx, self.last_cy = None, None
-        self.last_pan_dir, self.last_tilt_dir = "NONE", "NONE"
-        self.last_command_time = 0
-
-        self.DEADZONE_PX = 30
-        self.COMMAND_INTERVAL = 0.1  # seconds
-        self.SPEED = 2
-
-        self._build_ui()
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_frame)
-        self.timer.start(30)  # ~33 FPS
-
-    def _build_ui(self):
-        layout = QHBoxLayout(self)
-
-        # Left: Video feed
-        left_layout = QVBoxLayout()
-        left_layout.addWidget(QLabel("<b>Video Feed</b>"))
-        self.video_label = QLabel()
-        self.video_label.setFixedSize(640, 480)
-        left_layout.addWidget(self.video_label)
-        layout.addLayout(left_layout, 2)
-
-        # Right: Logs
-        right_layout = QVBoxLayout()
-        right_layout.addWidget(QLabel("<b>Logs / Messages</b>"))
-        self.logview = QTextEdit()
-        self.logview.setReadOnly(True)
-        right_layout.addWidget(self.logview)
-        layout.addLayout(right_layout, 1)
-
-        self.setLayout(layout)
+        self.setWindowTitle("Red Object Tracker (Server Mode)")
+        self.setGeometry(200,100,700,600)
+        self.vbox = QVBoxLayout(); self.setLayout(self.vbox)
+        
+        # Video Display
+        self.video_label = QLabel(); 
+        self.video_label.setFixedSize(640,480); 
+        self.video_label.setAlignment(Qt.AlignCenter)
+        self.vbox.addWidget(self.video_label)
+        
+        # Log Console
+        self.logview = QTextEdit(); 
+        self.logview.setReadOnly(True); 
+        self.logview.setMaximumHeight(150);
+        self.vbox.addWidget(self.logview)
+        
+        # Server Initialization
+        self.ws_server = WsServer(WS_PORT); 
+        self.ws_server.sig_log.connect(self.append_log)
+        
+        # Camera Setup
+        self.cap = cv2.VideoCapture(0); 
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH,640); 
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT,480)
+        
+        # Tracking State
+        self.last_cx,self.last_cy=None,None
+        self.last_pan_dir,self.last_tilt_dir="NONE","NONE" # Initialize to NONE
+        
+        # Timer for Frame Update
+        self.timer = QTimer(); 
+        self.timer.timeout.connect(self.update_frame); 
+        self.timer.start(30) # ~33 FPS
 
     @pyqtSlot()
-    def on_server_ready(self):
-        self.append_log("[GUI] Server ready")
-
-    @pyqtSlot(str)
-    def append_log(self, text):
-        self.logview.append(text)
-
-    @pyqtSlot(str)
-    def on_incoming_message(self, raw):
-        try:
-            obj = json.loads(raw)
-            self.append_log(f"[INCOMING JSON] {json.dumps(obj, indent=2)}")
-        except Exception:
-            self.append_log(f"[INCOMING RAW] {raw}")
-
     def update_frame(self):
         ret, frame = self.cap.read()
-        if not ret:
-            return
-
-        frame_blur = cv2.GaussianBlur(frame, (7, 7), 0)
-        hsv = cv2.cvtColor(frame_blur, cv2.COLOR_BGR2HSV)
-        h, w, _ = frame.shape
-        center_x, center_y = w // 2, h // 2
-
-        # Red color range
-        lower_red1 = np.array([0, 100, 70])
-        upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([170, 170, 120])
-        upper_red2 = np.array([180, 255, 255])
-
-        mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-        mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-        mask = cv2.bitwise_or(mask1, mask2)
-        kernel = np.ones((5, 5), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        target_contour = None
-        max_area = 0
-
+        if not ret: return
+        
+        # Image Processing for Red Tracking
+        frame_blur = cv2.GaussianBlur(frame,(7,7),0)
+        hsv=cv2.cvtColor(frame_blur,cv2.COLOR_BGR2HSV)
+        h,w,_=frame.shape; center_x,center_y=w//2,h//2
+        
+        # Red color range definition (two ranges needed for Hue wrap-around)
+        lower_red1=np.array([0,80,50]); upper_red1=np.array([10,255,255])
+        lower_red2=np.array([170,100,50]); upper_red2=np.array([180,255,255])
+        mask1=cv2.inRange(hsv,lower_red1,upper_red1); mask2=cv2.inRange(hsv,lower_red2,upper_red2)
+        mask=cv2.bitwise_or(mask1,mask2)
+        
+        # Morphological operations for noise reduction
+        kernel=np.ones((5,5),np.uint8); 
+        mask=cv2.morphologyEx(mask,cv2.MORPH_CLOSE,kernel); 
+        mask=cv2.morphologyEx(mask,cv2.MORPH_OPEN,kernel)
+        
+        # Find contours
+        contours,_=cv2.findContours(mask,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        
+        target_contour=None; max_area=0
         for contour in contours:
-            area = cv2.contourArea(contour)
-            if area > 500 and area > max_area:
-                max_area = area
-                target_contour = contour
-            cv2.drawContours(frame, [contour], -1, (0, 255, 0), 1)
-
-        cv2.circle(frame, (center_x, center_y), 6, (0, 255, 255), -1)
-        cv2.line(frame, (center_x - 20, center_y), (center_x + 20, center_y), (0, 255, 255), 1)
-        cv2.line(frame, (center_x, center_y - 20), (center_x, center_y + 20), (0, 255, 255), 1)
-
-        direction_text = "No Target"
-        cx, cy = None, None
-
+            area=cv2.contourArea(contour)
+            # Find the largest contour over a minimum size
+            if area>300 and area>max_area: 
+                max_area=area
+                target_contour=contour
+                cv2.drawContours(frame,[contour],-1,(0,255,0),1)
+                
+        # Draw center crosshair
+        cv2.circle(frame,(center_x,center_y),6,(0,255,255),-1)
+        
+        direction="No Target"
+        pan_dir,tilt_dir="NONE","NONE"
+        cx,cy=None,None
+        
         if target_contour is not None:
-            x, y, w_box, h_box = cv2.boundingRect(target_contour)
-            cv2.rectangle(frame, (x, y), (x + w_box, y + h_box), (255, 0, 0), 3)
-            M = cv2.moments(target_contour)
-            if M["m00"] != 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                self.last_cx, self.last_cy = cx, cy
-                cv2.circle(frame, (cx, cy), 6, (0, 0, 255), -1)
-                dx = cx - center_x
-                dy = cy - center_y
-
-                # Deadzone logic
-                pan_dir, tilt_dir = "NONE", "NONE"
-                if dx < -self.DEADZONE_PX:
-                    pan_dir = "LEFT"
-                elif dx > self.DEADZONE_PX:
-                    pan_dir = "RIGHT"
-                if dy < -self.DEADZONE_PX:
-                    tilt_dir = "UP"
-                elif dy > self.DEADZONE_PX:
-                    tilt_dir = "DOWN"
-
-                direction_text = f"Pan: {pan_dir} | Tilt: {tilt_dir}"
-
-                # Send command if changed or interval passed
-                curr_time = time.time()
-                if (pan_dir != self.last_pan_dir or tilt_dir != self.last_tilt_dir or
-                        curr_time - self.last_command_time > self.COMMAND_INTERVAL):
-                    msg = {
-                        "type": "MOVE_DIR",
-                        "id": str(int(curr_time * 1000)),
-                        "pan_dir": pan_dir,
-                        "tilt_dir": tilt_dir,
-                        "speed": self.SPEED
+            # Draw bounding box
+            x,y,w_box,h_box=cv2.boundingRect(target_contour)
+            cv2.rectangle(frame,(x,y),(x+w_box,y+h_box),(255,0,0),2)
+            
+            # Calculate centroid
+            M=cv2.moments(target_contour)
+            if M["m00"]!=0:
+                cx=int(M["m10"]/M["m00"])
+                cy=int(M["m01"]/M["m00"])
+                self.last_cx,self.last_cy=cx,cy
+                
+                cv2.circle(frame,(cx,cy),6,(0,0,255),-1)
+                
+                dx,dy=cx-center_x,cy-center_y
+                
+                # Check if centered within the radius
+                if abs(dx)<STEP_RADIUS and abs(dy)<STEP_RADIUS: 
+                    direction="Centered ✅"
+                    pan_dir,tilt_dir="NONE","NONE" # Stop movement
+                else:
+                    # Determine directional command based on largest offset
+                    if abs(dx)>abs(dy): 
+                        pan_dir="LEFT" if dx<0 else "RIGHT"
+                        tilt_dir="NONE"
+                        direction=f"Pan {pan_dir}"
+                    else: 
+                        tilt_dir="UP" if dy<0 else "DOWN"
+                        pan_dir="NONE"
+                        direction=f"Tilt {tilt_dir}"
+                
+                # Only send MOVE_DIR if direction has changed
+                if (pan_dir != self.last_pan_dir) or (tilt_dir != self.last_tilt_dir):
+                    msg={
+                        "type":"MOVE_DIR",
+                        "id":uuid.uuid4().hex[:12], # Unique ID for the command
+                        "pan_dir":pan_dir,
+                        "tilt_dir":tilt_dir,
+                        "speed":MOVE_SPEED
                     }
-                    self.server.send_json(msg)
+                    self.ws_server.broadcast_json(msg)
                     self.last_pan_dir = pan_dir
                     self.last_tilt_dir = tilt_dir
-                    self.last_command_time = curr_time
 
-        elif self.last_cx is not None:
-            cv2.circle(frame, (self.last_cx, self.last_cy), 6, (255, 255, 0), -1)
-            direction_text = "Last seen"
+        # Display the current tracking status
+        cv2.putText(frame,direction,(20,30),cv2.FONT_HERSHEY_SIMPLEX,1,(255,255,255),2)
+        
+        # Convert OpenCV frame to QPixmap for PyQt display
+        rgb=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB); 
+        h,w,ch=rgb.shape; 
+        bytesPerLine=ch*w
+        qt_img=QImage(rgb.data,w,h,bytesPerLine,QImage.Format_RGB888); 
+        self.video_label.setPixmap(QPixmap.fromImage(qt_img))
 
-        # Overlay info
-        cv2.putText(frame, direction_text, (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    @pyqtSlot(str)
+    def append_log(self,msg): 
+        # Ensure only the last 100 lines are kept to prevent memory overload
+        self.logview.append(msg)
+        cursor = self.logview.textCursor()
+        cursor.movePosition(cursor.End)
+        self.logview.setTextCursor(cursor)
 
-        # Convert to Qt image
-        rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        qt_image = QImage(rgb_image.data, w, h, 3 * w, QImage.Format_RGB888)
-        self.video_label.setPixmap(QPixmap.fromImage(qt_image))
-
+    # Clean up the camera and server on window close
     def closeEvent(self, event):
         self.cap.release()
-        self.server.stop()
-        event.accept()
+        self.ws_server.loop.call_soon_threadsafe(self.ws_server.loop.stop)
+        self.ws_server.thread.join(timeout=1)
+        super().closeEvent(event)
 
-
-def main():
-    app = QApplication(sys.argv)
-    gui = TrackerGUI()
-    gui.show()
+if __name__=="__main__":
+    app=QApplication(sys.argv)
+    win=MainWindow(); win.show()
     sys.exit(app.exec_())
-
-
-if __name__ == "__main__":
-    main()

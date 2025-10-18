@@ -1,0 +1,110 @@
+:root{
+	--bg:#0f1113;
+	--card:#141617;
+	--muted:#9aa3a8;
+	--accent:#23a6d5;
+	--accent-2:#8be9fd;
+}
+.sr-only{position:absolute!important;height:1px;width:1px;overflow:hidden;clip:rect(1px,1px,1px,1px);white-space:nowrap}
+*{box-sizing:border-box}
+body { font-family: 'Segoe UI', Arial, sans-serif; background:linear-gradient(180deg,var(--bg),#0b0c0d); color:#e8eef2; text-align:center; margin:0; padding:20px; display:block; }
+h1{margin:6px 0 18px 0;font-weight:700;letter-spacing:0.6px;color:var(--accent-2);font-size:32px;text-align:center}
+.cards{display:flex;gap:18px;flex-wrap:wrap;justify-content:center;align-items:flex-start;max-width:1100px;margin:0 auto}
+.with-panel-right{margin-right:420px}
+.card{background:linear-gradient(180deg,rgba(255,255,255,0.02),transparent);border-radius:12px;padding:20px;margin:12px;flex:1 1 300px;max-width:380px;min-width:260px;box-shadow:0 6px 18px rgba(0,0,0,0.7);border:1px solid rgba(255,255,255,0.03);transition:transform .22s ease,box-shadow .22s ease;}
+.card:hover{transform:translateY(-6px);box-shadow:0 18px 40px rgba(0,0,0,0.6);}
+.card h3{margin:0 0 10px 0;color:#e6f7ff;font-size:18px}
+.muted{color:var(--muted);font-size:13px}
+button{min-width:70px;height:46px;margin:6px;font-size:15px;border:none;border-radius:10px;color:white;cursor:pointer;background:linear-gradient(180deg,var(--accent),#0b7ea6);box-shadow:0 6px 14px rgba(11,126,166,0.12);transition:transform .12s ease,opacity .12s ease;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+button:active{transform:translateY(1px);} 
+button.secondary{background:linear-gradient(180deg,#333,#222);color:#ddd}
+#panTiltGrid{display:grid;grid-template-columns:1fr 1fr 1fr;justify-items:center;align-items:center;margin:18px 0;}
+/* Pan/Tilt spatial grid */
+.pan-grid{display:grid;grid-template-columns:64px 64px 64px;grid-template-rows:48px 48px 48px;gap:8px;justify-content:center;align-items:center}
+.pan-grid button{width:56px;height:44px}
+.pan-up{grid-column:1/4;grid-row:1/2;justify-self:center}
+.pan-right{grid-column:3/4;grid-row:1/4;justify-self:center}
+.pan-left{grid-column:1/2;grid-row:2/3;justify-self:center}
+.pan-down{grid-column:2/3;grid-row:3/4;justify-self:center}
+.pan-center{grid-column:2/3;grid-row:2/3}
+.pan-empty,.pan-empty2,.pan-empty3,.pan-empty4{width:1px;height:1px}
+
+/* Position and value displays */
+#pos{font-weight:600;color:var(--accent-2);margin-top:8px}
+#dist{font-size:20px;font-weight:650;color:var(--accent-2)}
+.dist-inline{margin-top:10px;font-size:16px;color:var(--accent-2);font-weight:600}
+
+/* Gear buttons */
+#gearButtons{display:flex;gap:8px;justify-content:center;margin:12px 0}
+#gearButtons button{width:44px;height:44px;padding:0;background:transparent;border:1px solid rgba(255,255,255,0.06);box-shadow:none}
+#gearButtons button.active{background:linear-gradient(180deg,var(--accent-2),var(--accent));color:#021017;transform:scale(1.08);box-shadow:0 10px 20px rgba(11,126,166,0.12)}
+#gear{margin-top:6px;color:var(--muted)}
+
+/* pulse effect */
+.pulse{animation:gearPulse .6s ease}
+@keyframes gearPulse{
+	0%{transform:scale(1);filter:brightness(1)}
+	50%{transform:scale(1.14);filter:brightness(1.15)}
+	100%{transform:scale(1);filter:brightness(1)}
+}
+
+/* Settings panel status */
+#espSettingsPanel .status{font-size:12px;color:var(--muted);margin-top:6px}
+
+/* status badge */
+.status-badge{display:inline-block;padding:4px 8px;border-radius:999px;font-size:12px;margin-left:8px}
+.status-badge.ok{background:#153; color:#dfffe6}
+.status-badge.unreachable{background:#731313;color:#ffdede}
+.status-badge.unknown{background:#444;color:#ddd}
+
+.endpoints{display:flex;gap:10px;margin-top:6px;font-size:12px;color:var(--muted)}
+.endpoints .ep{background:rgba(255,255,255,0.02);padding:4px 8px;border-radius:6px}
+
+/* Car spatial grid */
+.car-grid{display:grid;grid-template-columns:80px 120px 80px;grid-template-rows:48px 48px 48px;gap:8px;justify-content:center;align-items:center}
+.car-grid button{min-width:72px}
+.car-up{grid-column:2/3;grid-row:1/2}
+.car-left{grid-column:1/2;grid-row:2/3}
+.car-center{grid-column:2/3;grid-row:2/3}
+.car-right{grid-column:3/4;grid-row:2/3}
+.car-down{grid-column:2/3;grid-row:3/4}
+.car-empty,.car-empty2,.car-empty3,.car-empty4{width:1px;height:1px}
+
+/* Settings panel styles (replaces inline styles) */
+.esp-settings-panel{position:fixed;top:12px;right:12px;z-index:9999;background:linear-gradient(180deg,#0b0c0d,#0f1315);padding:12px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);width:clamp(260px,28vw,360px);max-height:calc(100vh - 24px);overflow:auto}
+.esp-settings-panel .esp-row{display:flex;gap:8px;align-items:center}
+.esp-settings-panel .esp-input{flex:1;padding:8px;border-radius:6px;border:1px solid #444;background:#111;color:#fff;min-width:0}
+.esp-settings-panel .btn{padding:6px 10px;border-radius:6px;background:linear-gradient(180deg,var(--accent),#0b7ea6);color:#fff;border:none;min-width:0}
+.esp-settings-panel .btn.secondary{background:#333}
+.esp-settings-panel .btn.detect{background:#164a58}
+.esp-settings-panel .btn.reset{background:#5a2b2b}
+.esp-settings-panel .esp-actions{margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-start}
+.esp-settings-panel .esp-meta{margin-top:8px}
+.esp-settings-panel .diag-log{margin-top:8px;max-height:160px;overflow:auto;background:rgba(255,255,255,0.01);padding:8px;border-radius:8px;font-size:12px;color:var(--muted)}
+.esp-settings-panel .diag{padding:4px 0;border-bottom:1px dashed rgba(255,255,255,0.02)}
+
+/* Download & toggle */
+.esp-settings-panel .btn.download{background:#2b5a2b}
+.esp-settings-panel.collapsed{width:200px}
+.esp-settings-panel.collapsed .diag-log{display:none}
+.esp-settings-panel.collapsed .endpoints{display:none}
+.esp-settings-panel.collapsed .esp-actions button:not(.toggle){display:none}
+.esp-settings-panel .btn.toggle{background:#555}
+.esp-settings-panel .esp-actions .btn{flex:0 0 auto;max-width:160px}
+.esp-settings-panel .esp-actions .btn > span{display:inline-block;overflow:hidden;text-overflow:ellipsis}
+
+/* Toasts */
+#toastContainer{position:fixed;right:18px;bottom:18px;z-index:10000;display:flex;flex-direction:column;gap:8px}
+.toast{background:linear-gradient(180deg,#0f434f,#0b2b34);color:#e8f8fb;padding:10px 12px;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,0.6);min-width:180px;opacity:0;transform:translateY(8px);animation:toastIn .28s ease forwards}
+.toast.info{background:linear-gradient(180deg,#164a58,#0b2b34)}
+.toast.error{background:linear-gradient(180deg,#631516,#3a0707)}
+@keyframes toastIn{ to{opacity:1;transform:translateY(0);} }
+
+/* Make sure arrow key presses don't scroll page */
+html,body{height:100%}
+
+@media (max-width:860px){
+ 	.cards{flex-direction:column;align-items:stretch;padding:0 12px}
+ 	.card{max-width:none}
+  .esp-settings-panel{position:fixed;left:12px;right:12px;top:12px;width:auto}
+}

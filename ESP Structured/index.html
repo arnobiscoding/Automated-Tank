@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 Car + Pan/Tilt + ToF</title>
+<link rel="stylesheet" href="./style.css">
+<!-- Inline SVG favicon to avoid browser requesting /favicon.ico which causes 404 when serving from a static root -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%231e1e1e'/%3E%3Ctext x='50' y='57' font-size='50' text-anchor='middle' fill='%23ffffff' font-family='Segoe%20UI,Arial'%3ET%3C/text%3E%3C/svg%3E"></head>
+<body>
+<h1>ESP32 Car + Pan/Tilt + ToF</h1>
+
+<div class="cards">
+  <div class="card">
+  <h3>Gun</h3>
+  <div id="panTiltGrid" class="pan-grid">
+    <button id="tiltUp" class="pan-up">▲</button>
+    <div class="pan-empty"></div>
+    <button id="panRight" class="pan-right">▶</button>
+
+    <button id="panLeft" class="pan-left">◀</button>
+    <div class="pan-center"></div>
+    <div class="pan-empty2"></div>
+
+    <div class="pan-empty3"></div>
+    <button id="tiltDown" class="pan-down">▼</button>
+    <div class="pan-empty4"></div>
+  </div>
+  <div id="pos">Pan: -- | Tilt: --</div>
+  <div id="dist" class="dist-inline">-- mm</div>
+  </div>
+
+  <div class="card">
+  <h3>Car</h3>
+  <div class="car-grid" id="carGrid">
+    <div class="car-up"><button id="forward">Forward</button></div>
+    <div class="car-empty"></div>
+    <div class="car-empty2"></div>
+
+    <div class="car-left"><button id="left">Left</button></div>
+    <div class="car-center"><button id="stop">Stop</button></div>
+    <div class="car-right"><button id="right">Right</button></div>
+
+    <div class="car-empty3"></div>
+    <div class="car-down"><button id="backward">Backward</button></div>
+    <div class="car-empty4"></div>
+  </div>
+  <h4>Gears</h4>
+  <div id="gearButtons">
+    <button data-gear="1">1</button>
+    <button data-gear="2">2</button>
+    <button data-gear="3">3</button>
+    <button data-gear="4">4</button>
+    <button data-gear="5">5</button>
+  </div>
+  <div id="gear">Current Gear: 1</div>
+  </div>
+  
+
+
+ 
+<!-- Toast container for non-blocking notifications -->
+<div id="toastContainer" aria-live="polite" aria-atomic="true"></div>
+
+<script src="./main.js"></script>
+</body>
+</html>

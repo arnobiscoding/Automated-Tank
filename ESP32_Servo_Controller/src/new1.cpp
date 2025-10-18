@@ -6,8 +6,8 @@
       * MOVE      -> absolute target
       * CANCEL    -> cancel specific command
       * STATUS_REQ-> immediate status
-      * MOVE_DIR  -> continuous directional movement
-      * STOP      -> stop directional movement
+      * MOVE_DIR  -> continuous directional movement (updated to be the primary tracking mode)
+      * STOP      -> stop directional movement (kept for completeness, but MOVE_DIR with NONE is preferred)
   Libraries required:
   - WebSocketsClient
   - ArduinoJson (v6)
@@ -35,7 +35,7 @@ const int PAN_MIN = 0;
 const int PAN_MAX = 180;
 const int TILT_MIN = 0;
 const int TILT_MAX = 180;
-const int TILT_MIN_SAFE = 45;  // NEW: minimum tilt for safety
+const int TILT_MIN_SAFE = 45;  // minimum tilt for safety
 
 const int STEP_INTERVAL_MS = 15;
 const int STEP_SIZE = 1;
@@ -97,7 +97,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 
     const char* t = doc["type"] | "";
 
-    // ---------- Absolute MOVE ----------
+    // ---------- Absolute MOVE (Priority lower than MOVE_DIR) ----------
     if (strcmp(t, "MOVE") == 0) {
       const char* id = doc["id"] | "";
       if (strlen(id) == 0) return;
@@ -105,7 +105,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       int tilt = doc["tilt"] | currentTilt;
 
       // Enforce safe minimum tilt
-      tilt = max(tilt, TILT_MIN_SAFE);
+      tilt = max((int)tilt, (int)TILT_MIN_SAFE);
 
       pan = constrain(pan, PAN_MIN, PAN_MAX);
       tilt = constrain(tilt, TILT_MIN, TILT_MAX);
@@ -149,13 +149,13 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       StaticJsonDocument<256> st;
       st["type"] = "STATUS";
       st["id"] = "";
-      st["state"] = hasActive ? "BUSY" : "IDLE";
+      st["state"] = hasActive ? (activeMode == 1 ? "BUSY_ABS" : "BUSY_DIR") : "IDLE";
       st["pan"] = currentPan;
       st["tilt"] = currentTilt;
       if (hasActive) st["cmd_id"] = activeCmdId.c_str();
       sendJSON(st);
 
-    // ---------- MOVE_DIR ----------
+    // ---------- MOVE_DIR (Highest Priority - Preempts MOVE) ----------
     } else if (strcmp(t, "MOVE_DIR") == 0) {
       const char* id = doc["id"] | "";
       if (strlen(id) == 0) return;
@@ -171,37 +171,61 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       if (strcmp(tilt_dir, "DOWN") == 0) newTiltDir = -1;
       else if (strcmp(tilt_dir, "UP") == 0) newTiltDir = 1;
 
-      // enforce safe tilt: block downward if at minimum
-      if (newTiltDir == -1 && currentTilt <= TILT_MIN_SAFE) newTiltDir = 0;
-
       sendAck(String(id));
+
       noInterrupts();
-      if (hasActive) sendStatus(activeCmdId, "PREEMPTED", nullptr);
+      bool wasAbsolute = hasActive && activeMode == 1;
+
+      // New MOVE_DIR always overrides current action
+      if (wasAbsolute) {
+        sendStatus(activeCmdId, "PREEMPTED", nullptr);
+        preemptFlag = true; // Signal Core1 to end absolute move
+      }
+
+      // Update directional movement state
+      // If no direction, it's essentially a STOP, but we keep the mode active briefly
       activeCmdId = String(id);
       activeMode = 2;
       panDir = newPanDir;
       tiltDir = newTiltDir;
       moveSpeed = (uint8_t)speed;
-      hasActive = true;
+      hasActive = (panDir != 0 || tiltDir != 0); // Only active if moving
       cancelFlag = false;
-      preemptFlag = false;
       cmdStartMillis = millis();
+
+      // If it's a stop command (NONE/NONE), let it stop on core1 and clear state there.
+      // If it's a move command, keep hasActive=true
+      if (panDir != 0 || tiltDir != 0) {
+         hasActive = true;
+         sendStatus(activeCmdId, "MOVING", nullptr);
+      } else {
+         // It's a stop command, clear the state immediately on core0 to make it IDLE
+         // Core1 task will also clear state, but this simplifies status reporting
+         if (activeMode == 2) {
+            sendStatus(activeCmdId, "STOPPED", nullptr);
+         }
+         activeMode = 0;
+         hasActive = false;
+         activeCmdId = "";
+      }
       interrupts();
 
-      sendStatus(activeCmdId, "MOVING", nullptr);
 
-    // ---------- STOP ----------
+    // ---------- STOP (Legacy/Manual Stop) ----------
     } else if (strcmp(t, "STOP") == 0) {
       const char* id = doc["id"] | "";
       String sid = String(id);
       bool stopped = false;
 
+      sendAck(sid);
+
       noInterrupts();
-      if (hasActive) {
+      if (hasActive && activeMode == 2) {
+        // Only stop if no ID is provided, or ID matches active directional command.
         if (sid.length() == 0 || activeCmdId == sid) {
           panDir = 0; tiltDir = 0;
           activeMode = 0;
-          activeCmdId = "";
+          // activeCmdId cleared on Core1 to allow status send before clearing
           hasActive = false;
           cancelFlag = false;
           preemptFlag = false;
@@ -210,7 +234,6 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       }
       interrupts();
 
-      sendAck(sid);
       if (stopped) sendStatus(sid.length() ? sid : String(""), "STOPPED", nullptr);
       else sendStatus(sid.length() ? sid : String(""), "ERROR", "not_active");
     }
@@ -252,8 +275,9 @@ void taskMotion(void* pv) {
   while (true) {
     unsigned long now = millis();
 
-    // pick next absolute command if idle
-    if (!hasActive) {
+    // pick next absolute command if idle and queue is not empty
+    // Directional commands are handled immediately on Core0, only MOVE (absolute) is queued.
+    if (!hasActive && !cmdQueue.empty()) {
       noInterrupts();
       if (!cmdQueue.empty()) {
         Cmd c = cmdQueue.front();
@@ -262,7 +286,7 @@ void taskMotion(void* pv) {
         activeCmdId = c.id;
         activeMode = 1;
         targetPan = c.pan;
-        targetTilt = max(c.tilt, TILT_MIN_SAFE); // enforce safe tilt
+        targetTilt = max((int)c.tilt, (int)TILT_MIN_SAFE); // enforce safe tilt
         cmdStartMillis = now;
         cancelFlag = false;
         preemptFlag = false;
@@ -277,7 +301,13 @@ void taskMotion(void* pv) {
       lastStep = now;
 
       // --- Directional motion ---
-      if (hasActive && activeMode == 2) {
+      if (activeMode == 2) {
+        // Check for safe tilt before moving down
+        int8_t actualTiltDir = tiltDir;
+        if (tiltDir == -1 && currentTilt <= TILT_MIN_SAFE) {
+           actualTiltDir = 0; // Block downward movement
+        }
+
         if (panDir != 0) {
           int nextPan = currentPan + panDir * moveSpeed;
           nextPan = constrain(nextPan, PAN_MIN, PAN_MAX);
@@ -286,30 +316,27 @@ void taskMotion(void* pv) {
             servoPan.write(currentPan);
           }
         }
-        if (tiltDir != 0) {
-          int nextTilt = currentTilt + tiltDir * moveSpeed;
-          nextTilt = max(nextTilt, TILT_MIN_SAFE);
-          nextTilt = constrain(nextTilt, TILT_MIN, TILT_MAX);
+        if (actualTiltDir != 0) {
+          int nextTilt = currentTilt + actualTiltDir * moveSpeed;
+          nextTilt = constrain(nextTilt, TILT_MIN_SAFE, TILT_MAX); // Constrain from TILT_MIN_SAFE
           if (nextTilt != currentTilt) {
             currentTilt = nextTilt;
             servoTilt.write(currentTilt);
           }
         }
 
+        // Check for end conditions (preempt is only from absolute)
         if (cancelFlag) {
           sendStatus(activeCmdId, "CANCELLED", nullptr);
           noInterrupts();
           hasActive = false; activeCmdId = ""; activeMode = 0;
           cancelFlag = false; panDir = 0; tiltDir = 0;
           interrupts();
-        } else if (preemptFlag) {
-          sendStatus(activeCmdId, "PREEMPTED", nullptr);
-          noInterrupts();
-          hasActive = false; activeCmdId = ""; activeMode = 0;
-          preemptFlag = false; panDir = 0; tiltDir = 0;
-          interrupts();
         } else if (now - cmdStartMillis > COMMAND_TIMEOUT_MS) {
-          sendStatus(activeCmdId, "TIMEOUT", nullptr);
+          // Only time out if it was actively moving. If it was a stop, Core0 cleared it.
+          if (panDir != 0 || tiltDir != 0) {
+              sendStatus(activeCmdId, "TIMEOUT", nullptr);
+          }
           noInterrupts();
           hasActive = false; activeCmdId = ""; activeMode = 0;
           panDir = 0; tiltDir = 0;
@@ -317,7 +344,8 @@ void taskMotion(void* pv) {
         }
 
       // --- Absolute motion ---
-      } else if (hasActive && activeMode == 1) {
+      } else if (activeMode == 1) {
+
         if (fabs(targetPan - currentPan) > 0.01f) {
           if (targetPan > currentPan) currentPan += min(STEP_SIZE, (int)ceil(targetPan - currentPan));
           else currentPan -= min(STEP_SIZE, (int)ceil(currentPan - targetPan));
@@ -327,7 +355,7 @@ void taskMotion(void* pv) {
         if (fabs(targetTilt - currentTilt) > 0.01f) {
           if (targetTilt > currentTilt) currentTilt += min(STEP_SIZE, (int)ceil(targetTilt - currentTilt));
           else currentTilt -= min(STEP_SIZE, (int)ceil(currentTilt - targetTilt));
-          currentTilt = max(currentTilt, TILT_MIN_SAFE);
+          currentTilt = max((int)currentTilt, (int)TILT_MIN_SAFE);
           currentTilt = constrain(currentTilt, TILT_MIN, TILT_MAX);
           servoTilt.write(currentTilt);
         }
@@ -339,7 +367,7 @@ void taskMotion(void* pv) {
           sendStatus(activeCmdId, "CANCELLED", nullptr);
           noInterrupts(); hasActive = false; activeCmdId = ""; activeMode = 0; cancelFlag = false; interrupts();
         } else if (preemptFlag) {
-          sendStatus(activeCmdId, "PREEMPTED", nullptr);
+          // PREEMPTED status is sent on Core0 when MOVE_DIR arrives
           noInterrupts(); hasActive = false; activeCmdId = ""; activeMode = 0; preemptFlag = false; interrupts();
         } else if (panReached && tiltReached) {
           sendStatus(activeCmdId, "SUCCESS", nullptr);
@@ -358,6 +386,12 @@ void taskMotion(void* pv) {
 void setup() {
   Serial.begin(115200);
   delay(200);
+
+  // Allow up to 15 channels (optional)
+  ESP32PWM::allocateTimer(0);
+	ESP32PWM::allocateTimer(1);
+	ESP32PWM::allocateTimer(2);
+	ESP32PWM::allocateTimer(3);
 
   servoPan.attach(SERVO_PAN_PIN);
   servoTilt.attach(SERVO_TILT_PIN);
@@ -383,6 +417,7 @@ void setup() {
   webSocket.setReconnectInterval(5000);
   webSocket.enableHeartbeat(5000, 2000, 3);
 
+  // Set the core for the motion task to core 1
   xTaskCreatePinnedToCore(taskMotion, "MotionTask", 4096, NULL, 2, NULL, 1);
   Serial.println("[SETUP] Done");
 }
